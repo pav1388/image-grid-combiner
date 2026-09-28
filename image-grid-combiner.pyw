@@ -23,7 +23,14 @@ try:
 except ImportError:
     HAS_PIL = False
 
-MAIN_VERSION = "v0.14"
+try:
+    from PIL import ImageGrab
+    HAS_IMAGEGRAB = True
+except Exception:
+    ImageGrab = None
+    HAS_IMAGEGRAB = False
+
+MAIN_VERSION = "v0.15"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff")
 PREVIEW_DELAY = 500
 SETTINGS_FILE_NAME = "image-grid-combiner-settings.json"
@@ -1571,7 +1578,10 @@ class App(tk.Tk):
         ttk.Separator(row3, orient="vertical").pack(side="left", fill="y", padx=10)
         self._btn(row3, text="Удалить с диска", command=self.delete_selected_files,
                   tooltip="Удалить выделенные файлы (Delete)").pack(side="left")
-
+        self._btn(row3, text="Вставить из буфера в файл", command=self.paste_from_clipboard,
+                  tooltip="Сохранить изображение из буфера обмена в clipboard_image.png"
+                  ).pack(side="left")
+        
         self.files_count_var = tk.StringVar(value="0/0")
         ttk.Label(row3, textvariable=self.files_count_var).pack(side="right")
 
@@ -1912,8 +1922,7 @@ class App(tk.Tk):
         self._rename_saved_selection = []
         self._restore_selection(saved_sel)
 
-    # --- Удаление ---
-
+    # --- Удаление файла с диска---
     def delete_selected_files(self):
         sel = list(self.tree.selection())
         if not sel:
@@ -1960,6 +1969,86 @@ class App(tk.Tk):
             )
         else:
             self.log("Удалено с диска: {} файл(ов).".format(deleted))
+
+    # --- Вставка из буфера в файл---
+    def _grab_clipboard_image(self):
+        """Возвращает PIL.Image из буфера обмена или None."""
+        # Windows / macOS — через Pillow
+        if HAS_IMAGEGRAB:
+            try:
+                im = ImageGrab.grabclipboard()
+            except Exception as e:
+                self.log("ImageGrab: {}".format(e))
+                im = None
+            if isinstance(im, Image.Image):
+                return im
+            if isinstance(im, list) and im:
+                for p in im:
+                    if isinstance(p, str) and p.lower().endswith(IMAGE_EXTS):
+                        try:
+                            with Image.open(p) as f:
+                                return f.convert("RGBA").copy()
+                        except Exception:
+                            pass
+                return None
+            if sys.platform == "darwin":
+                return None
+
+        import shutil, subprocess
+        for cmd in (["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+                    ["xsel", "--clipboard", "--output"]):
+            exe = shutil.which(cmd[0])
+            if not exe:
+                continue
+            try:
+                data = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+                if data:
+                    return Image.open(io.BytesIO(data)).convert("RGBA").copy()
+            except Exception:
+                continue
+        return None
+
+    def paste_from_clipboard(self):
+        """Сохраняет изображение из буфера в clipboard_image.png (с автосчётчиком) и обновляет список."""
+        folder = self.input_folder_var.get()
+        if not os.path.isdir(folder):
+            messagebox.showerror("Вставка из буфера",
+                                 "Входная папка не найдена:\n{}".format(folder))
+            return
+
+        im = self._grab_clipboard_image()
+        if im is None:
+            messagebox.showinfo("Вставка из буфера",
+                                "В буфере обмена нет изображения.")
+            return
+
+        out_path = os.path.join(folder, "clipboard_image.png")
+        if os.path.exists(out_path):
+            i = 1
+            while True:
+                out_path = os.path.join(folder, "clipboard_image ({}).png".format(i))
+                if not os.path.exists(out_path):
+                    break
+                i += 1
+
+        try:
+            im.save(out_path, "PNG")
+        except Exception as e:
+            messagebox.showerror("Вставка из буфера",
+                                 "Не удалось сохранить файл:\n{}".format(e))
+            return
+
+        try:
+            w, h = im.size
+        except Exception:
+            w = h = 0
+        try:
+            im.close()
+        except Exception:
+            pass
+
+        self.log("Вставлено из буфера: {} ({}x{})".format(out_path, w, h))
+        self.refresh_files()
 
     # --- Hover-превью ---
 
