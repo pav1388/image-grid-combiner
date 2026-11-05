@@ -30,7 +30,7 @@ except Exception:
     ImageGrab = None
     HAS_IMAGEGRAB = False
 
-MAIN_VERSION = "v0.15"
+MAIN_VERSION = "v0.16"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff")
 PREVIEW_DELAY = 500
 SETTINGS_FILE_NAME = "image-grid-combiner-settings.json"
@@ -351,6 +351,7 @@ class BuildResult:
     ok: bool = False
     message: str = ""
     image: object = None
+    cells: Dict[str, Tuple[int, int, int, int]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -995,8 +996,17 @@ def preview_grid(items, settings, renderer, preview_max_size=1000,
                               bg, text_color, line_spacing_eff, log)
     except MemoryError:
         return BuildResult(False, "Не хватает памяти для предпросмотра")
+    
+    # Карта «путь к файлу → прямоугольник ячейки на холсте (в пикселях превью)»
+    cells: Dict[str, Tuple[int, int, int, int]] = {}
+    for idx, li in enumerate(layout.items):
+        r = idx // layout.cols
+        c = idx % layout.cols
+        cell_x = layout.gap + c * (layout.cell_w + layout.gap)
+        cell_y = layout.gap + r * (layout.cell_h + layout.gap)
+        cells[li.item.path] = (cell_x, cell_y, layout.cell_w, layout.cell_h)
 
-    return BuildResult(True, "", canvas)
+    return BuildResult(True, "", canvas, cells)
 
 
 def build_grid(items, out_path, settings, renderer, log=print,
@@ -1216,7 +1226,8 @@ class App(tk.Tk):
         self.renderer = TextRenderer()
         self._embedded_font_bytes = embedded_font_bytes()
         self._random_bg_color = random_pastel_color()
-
+        self._preview_cells: Dict[str, Tuple[int, int, int, int]] = {}
+        
         self.preview_image = None
         self._preview_pil = None
         self._preview_job = None
@@ -1607,6 +1618,7 @@ class App(tk.Tk):
         bar.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
 
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._refresh_selection_overlay())
         self.tree.bind("<Button-1>", self._tree_click)
         self.tree.bind("<B1-Motion>", self._tree_b1_motion)
         self.tree.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag_start_iid", None))
@@ -2634,7 +2646,40 @@ class App(tk.Tk):
         if not res.ok or res.image is None:
             return
         self._preview_pil = res.image
+        self._preview_cells = res.cells or {}
         self._render_preview_image()
+
+    def _draw_selection_overlay(self, scale: float):
+        if not self._preview_cells:
+            return
+        try:
+            sel_paths = set(self.tree.selection())
+        except Exception:
+            return
+        if not sel_paths:
+            return
+        bg = self._current_bg_color()
+        color = "#{:02x}{:02x}{:02x}".format( 255 - bg[0], 255 - bg[1], 255 - bg[2] )
+        for path in sel_paths:
+            cell = self._preview_cells.get(path)
+            if cell is None:
+                continue
+            x, y, w, h = cell
+            self.preview_canvas.create_rectangle(
+                x * scale, y * scale,
+                (x + w) * scale, (y + h) * scale,
+                outline=color, width=3, tags="selection_overlay",
+            )
+
+    def _refresh_selection_overlay(self):
+        if not self._preview_pil:
+            return
+        cw = max(1, self.preview_canvas.winfo_width())
+        ch = max(1, self.preview_canvas.winfo_height())
+        iw, ih = self._preview_pil.size
+        k = min(1.0, cw / iw, ch / ih)
+        self.preview_canvas.delete("selection_overlay")
+        self._draw_selection_overlay(k)
 
     def _render_preview_image(self):
         if not self._preview_pil:
@@ -2649,6 +2694,8 @@ class App(tk.Tk):
         self.preview_canvas.delete("all")
         self.preview_canvas.create_image(0, 0, anchor="nw", image=self.preview_image)
         self.preview_canvas.configure(scrollregion=(0, 0, disp.size[0], disp.size[1]))
+
+        self._draw_selection_overlay(k)
 
     # --- Сборка ---
 
@@ -2685,10 +2732,7 @@ class App(tk.Tk):
         return os.path.join(out_dir, name)
 
     def open_folder(self):
-        path = self.output_dir_var.get() or self.input_folder_var.get()
-        if not os.path.isdir(path):
-            path = self.input_folder_var.get()
-        self._open_path(path)
+        self._open_path(self.input_folder_var.get())
 
     def open_output_file(self):
         path = self._resolve_output_path()
